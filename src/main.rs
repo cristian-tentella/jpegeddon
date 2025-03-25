@@ -32,38 +32,39 @@ enum AppError {
 }
 
 fn repeated_jpeg_encode(
-    mut image: DynamicImage,
+    image: DynamicImage,
     repetitions: u8,
     quality: u8,
-) -> Result<DynamicImage, AppError> {
+) -> Result<Vec<u8>, AppError> {
+    let rgb_image = image.into_rgb8();
+    let (width, height) = rgb_image.dimensions();
+    let mut raw_rgb = rgb_image.into_raw();
+    let mut jpeg_buffer = Vec::with_capacity(2 * 1024 * 1024); // 2 megabytes
+
     for i in 1..=repetitions {
         println!("Repetition {}...", i);
-        image = jpeg_encode(image, quality)?;
+
+        jpeg_buffer.clear();
+        let mut writer = Cursor::new(&mut jpeg_buffer);
+
+        let mut jpeg_encoder = JpegEncoder::new_with_quality(&mut writer, quality);
+        jpeg_encoder
+            .encode(&raw_rgb, width, height, image::ColorType::Rgb8.into())
+            .map_err(|source| AppError::ImageError {
+                context: format!("JPEG encoding failed at repetition {}", i),
+                source,
+            })?;
+
+        raw_rgb = image::load_from_memory_with_format(&jpeg_buffer, image::ImageFormat::Jpeg)
+            .map_err(|source| AppError::ImageError {
+                context: format!("JPEG encoding failed while preparing for repetition {}", i),
+                source,
+            })?
+            .into_rgb8()
+            .into_raw();
     }
 
-    Ok(image)
-}
-
-fn jpeg_encode(image: DynamicImage, quality: u8) -> Result<DynamicImage, AppError> {
-    let mut writer = Cursor::new(Vec::<u8>::new());
-    let mut jpeg_encoder = JpegEncoder::new_with_quality(&mut writer, quality);
-
-    jpeg_encoder
-        .encode_image(&image)
-        .map_err(|source| AppError::ImageError {
-            context: "Failed to encode image".to_string(),
-            source,
-        })?;
-
-    writer.set_position(0);
-    let encoded_image = image::load(&mut writer, image::ImageFormat::Jpeg).map_err(|source| {
-        AppError::ImageError {
-            context: "Failed to reload compressed image".to_string(),
-            source,
-        }
-    })?;
-
-    Ok(encoded_image)
+    Ok(jpeg_buffer)
 }
 
 fn load_image(path: String) -> Result<DynamicImage, AppError> {
@@ -79,24 +80,16 @@ fn load_image(path: String) -> Result<DynamicImage, AppError> {
         })
 }
 
-fn save_image(image: DynamicImage, path: String) -> Result<(), AppError> {
-    image.save(&path).map_err(|source| AppError::ImageError {
-        context: format!("Failed to save image to path {}", path),
-        source,
-    })
-}
-
 fn main() -> Result<(), AppError> {
-    let command_line_arguments = CommandLineArguments::parse();
+    let args = CommandLineArguments::parse();
 
-    save_image(
-        repeated_jpeg_encode(
-            load_image(command_line_arguments.input_path)?,
-            command_line_arguments.repetitions,
-            command_line_arguments.quality,
-        )?,
-        command_line_arguments.output_path,
-    )?;
+    let original_image = load_image(args.input_path)?;
+    let jpeg_data = repeated_jpeg_encode(original_image, args.repetitions, args.quality)?;
+
+    std::fs::write(&args.output_path, jpeg_data).map_err(|source| AppError::IoError {
+        context: format!("Failed to write output to {:?}", args.output_path),
+        source,
+    })?;
 
     Ok(())
 }
